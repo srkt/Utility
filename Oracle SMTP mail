@@ -1,0 +1,32 @@
+DECLARE
+    v_mail_conn    UTL_SMTP.CONNECTION;
+    v_sender       VARCHAR2(100) := 'your_email@example.com';
+    v_recipient    VARCHAR2(100) := 'recipient@example.com';
+    v_smtp_server VARCHAR2(100) := 'smtp.yourmailserver.com';
+    v_smtp_port    NUMBER := 25; -- Adjust based on your SMTP server
+BEGIN
+    -- Establish SMTP Connection
+    v_mail_conn := UTL_SMTP.OPEN_CONNECTION(v_smtp_server, v_smtp_port);
+    UTL_SMTP.HELO(v_mail_conn, 'yourdomain.com'); -- Use your domain
+
+    -- Authenticate if needed (Modify for AUTH LOGIN if required)
+    UTL_SMTP.MAIL(v_mail_conn, v_sender);
+    UTL_SMTP.RCPT(v_mail_conn, v_recipient);
+
+    -- Send Email Data
+    UTL_SMTP.OPEN_DATA(v_mail_conn);
+    UTL_SMTP.WRITE_DATA(v_mail_conn, 'Subject: Test Email from Oracle' || UTL_TCP.CRLF);
+    UTL_SMTP.WRITE_DATA(v_mail_conn, 'From: ' || v_sender || UTL_TCP.CRLF);
+    UTL_SMTP.WRITE_DATA(v_mail_conn, 'To: ' || v_recipient || UTL_TCP.CRLF);
+    UTL_SMTP.WRITE_DATA(v_mail_conn, UTL_TCP.CRLF || 'Hello, this is a test email from Oracle Database.');
+    UTL_SMTP.CLOSE_DATA(v_mail_conn);
+
+    -- Close Connection
+    UTL_SMTP.QUIT(v_mail_conn);
+    
+    DBMS_OUTPUT.PUT_LINE('Email sent successfully!');
+EXCEPTION
+    WHEN OTHERS THEN
+        DBMS_OUTPUT.PUT_LINE('Error: ' || SQLERRM);
+END;
+/
