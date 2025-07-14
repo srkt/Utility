@@ -1,0 +1,129 @@
+/* The code below defines the FacilityDto model, async repository (FacilityManager), and MVC controller (ReceivingFacilityController).
+ * The following are Razor MVC views for Create, Edit (Update), and Index (with search and listing), assuming Bootstrap and Kendo UI are used.
+ */
+
+// Create.cshtml
+@model FacilityDto
+@{
+    ViewBag.Title = "Create Facility";
+}
+<h2>Create Facility</h2>
+
+@using (Html.BeginForm("Create", "ReceivingFacility", FormMethod.Post))
+{
+    <div class="form-group">
+        @Html.LabelFor(m => m.FacilityName)
+        @Html.TextBoxFor(m => m.FacilityName, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.Address)
+        @Html.TextBoxFor(m => m.Address, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.City)
+        @Html.TextBoxFor(m => m.City, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.State)
+        @Html.TextBoxFor(m => m.State, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.Zip)
+        @Html.TextBoxFor(m => m.Zip, new { @class = "form-control" })
+    </div>
+    <button type="submit" class="btn btn-primary">Create</button>
+}
+
+// Edit.cshtml
+@model FacilityDto
+@{
+    ViewBag.Title = "Edit Facility";
+}
+<h2>Edit Facility</h2>
+
+@using (Html.BeginForm("Update", "ReceivingFacility", FormMethod.Post))
+{
+    @Html.HiddenFor(m => m.FacilityId)
+    <div class="form-group">
+        @Html.LabelFor(m => m.FacilityName)
+        @Html.TextBoxFor(m => m.FacilityName, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.Address)
+        @Html.TextBoxFor(m => m.Address, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.City)
+        @Html.TextBoxFor(m => m.City, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.State)
+        @Html.TextBoxFor(m => m.State, new { @class = "form-control" })
+    </div>
+    <div class="form-group">
+        @Html.LabelFor(m => m.Zip)
+        @Html.TextBoxFor(m => m.Zip, new { @class = "form-control" })
+    </div>
+    <button type="submit" class="btn btn-success">Update</button>
+}
+
+// Index.cshtml
+@model List<FacilityDto>
+@{
+    ViewBag.Title = "Facilities";
+}
+
+<h2>Facilities</h2>
+<input type="text" id="searchBox" class="form-control mb-3" placeholder="Search by name or city" />
+<div id="facilitiesGrid"></div>
+
+@section scripts {
+    <script src="https://kendo.cdn.telerik.com/2024.1.130/js/kendo.all.min.js"></script>
+    <script>
+        $(document).ready(function () {
+            function loadGrid(filter = "") {
+                $.getJSON("/ReceivingFacility/Search", { facilityName: filter, city: filter }, function (data) {
+                    $("#facilitiesGrid").kendoGrid({
+                        dataSource: {
+                            data: data,
+                            schema: {
+                                model: {
+                                    fields: {
+                                        FacilityName: { type: "string" },
+                                        City: { type: "string" },
+                                        State: { type: "string" },
+                                        Zip: { type: "string" }
+                                    }
+                                }
+                            },
+                            pageSize: 10
+                        },
+                        pageable: true,
+                        columns: [
+                            { field: "FacilityName", title: "Name" },
+                            { field: "City", title: "City" },
+                            { field: "State", title: "State" },
+                            { field: "Zip", title: "ZIP" },
+                            {
+                                command: [
+                                    { name: "edit", text: "Edit", click: function (e) {
+                                        const data = this.dataItem($(e.currentTarget).closest("tr"));
+                                        window.location.href = '/ReceivingFacility/Edit/' + data.FacilityId;
+                                    }}
+                                ],
+                                title: "Actions", width: "150px"
+                            }
+                        ]
+                    });
+                });
+            }
+
+            loadGrid();
+
+            $('#searchBox').on('input', function () {
+                var value = $(this).val();
+                loadGrid(value);
+            });
+        });
+    </script>
+}
