@@ -1,6 +1,8 @@
 using System;
 using System.Collections.Generic;
 using System.Text;
+using System.Threading.Tasks;
+using System.Web.Mvc;
 using Oracle.ManagedDataAccess.Client;
 
 public class FacilityDto
@@ -25,11 +27,11 @@ public class FacilityManager
 {
     private readonly string connectionString = "User Id=your_user;Password=your_password;Data Source=your_datasource;";
 
-    public void CreateFacility(FacilityDto facility)
+    public async Task CreateFacilityAsync(FacilityDto facility)
     {
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             string sql = @"
                 INSERT INTO WMGMT_RCV_FACILITY (
                     RCV_FACILITY_ID, RCV_FACILITY_NAME, ADDRESS, CITY, RCV_FACILITY_STATE, ZIP,
@@ -51,23 +53,24 @@ public class FacilityManager
                 cmd.Parameters.Add(":contactTitle", string.IsNullOrEmpty(facility.ContactTitle) ? DBNull.Value : (object)facility.ContactTitle);
                 cmd.Parameters.Add(":contactPerson", string.IsNullOrEmpty(facility.ContactPerson) ? DBNull.Value : (object)facility.ContactPerson);
                 cmd.Parameters.Add(":note", string.IsNullOrEmpty(facility.Note) ? DBNull.Value : (object)facility.Note);
-                cmd.ExecuteNonQuery();
+                await cmd.ExecuteNonQueryAsync();
             }
         }
     }
 
-    public FacilityDto ReadFacility(int id)
+    public async Task<FacilityDto> ReadFacilityAsync(int id)
     {
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             string sql = "SELECT * FROM WMGMT_RCV_FACILITY WHERE RCV_FACILITY_ID = :id AND IS_DELETED = 'N'";
+
             using (var cmd = new OracleCommand(sql, conn))
             {
                 cmd.Parameters.Add(":id", id);
-                using (var reader = cmd.ExecuteReader())
+                using (var reader = await cmd.ExecuteReaderAsync())
                 {
-                    if (reader.Read())
+                    if (await reader.ReadAsync())
                     {
                         return new FacilityDto
                         {
@@ -93,11 +96,11 @@ public class FacilityManager
         return null;
     }
 
-    public void UpdateFacility(FacilityDto facility)
+    public async Task UpdateFacilityAsync(FacilityDto facility)
     {
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             string sql = @"
                 UPDATE WMGMT_RCV_FACILITY SET
                     RCV_FACILITY_NAME = :name,
@@ -126,38 +129,39 @@ public class FacilityManager
                 cmd.Parameters.Add(":contactPerson", string.IsNullOrEmpty(facility.ContactPerson) ? DBNull.Value : (object)facility.ContactPerson);
                 cmd.Parameters.Add(":note", string.IsNullOrEmpty(facility.Note) ? DBNull.Value : (object)facility.Note);
                 cmd.Parameters.Add(":id", facility.FacilityId);
-                cmd.ExecuteNonQuery();
+                await cmd.ExecuteNonQueryAsync();
             }
         }
     }
 
-    public void DeleteFacility(int id)
+    public async Task DeleteFacilityAsync(int id)
     {
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             string sql = "UPDATE WMGMT_RCV_FACILITY SET IS_DELETED = 'Y', LAST_UPDATED = SYSDATE WHERE RCV_FACILITY_ID = :id";
+
             using (var cmd = new OracleCommand(sql, conn))
             {
                 cmd.Parameters.Add(":id", id);
-                cmd.ExecuteNonQuery();
+                await cmd.ExecuteNonQueryAsync();
             }
         }
     }
 
-    public List<FacilityDto> GetAllFacilities()
+    public async Task<List<FacilityDto>> GetAllFacilitiesAsync()
     {
         var facilities = new List<FacilityDto>();
 
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             string sql = "SELECT * FROM WMGMT_RCV_FACILITY WHERE IS_DELETED = 'N' ORDER BY RCV_FACILITY_NAME";
 
             using (var cmd = new OracleCommand(sql, conn))
-            using (var reader = cmd.ExecuteReader())
+            using (var reader = await cmd.ExecuteReaderAsync())
             {
-                while (reader.Read())
+                while (await reader.ReadAsync())
                 {
                     facilities.Add(new FacilityDto
                     {
@@ -183,13 +187,13 @@ public class FacilityManager
         return facilities;
     }
 
-    public List<FacilityDto> SearchFacilities(string facilityName = null, string city = null, string state = null, string zip = null)
+    public async Task<List<FacilityDto>> SearchFacilitiesAsync(string facilityName = null, string city = null, string state = null, string zip = null)
     {
         var results = new List<FacilityDto>();
 
         using (var conn = new OracleConnection(connectionString))
         {
-            conn.Open();
+            await conn.OpenAsync();
             var sql = new StringBuilder("SELECT * FROM WMGMT_RCV_FACILITY WHERE IS_DELETED = 'N'");
             var cmd = new OracleCommand();
             cmd.Connection = conn;
@@ -217,9 +221,9 @@ public class FacilityManager
 
             cmd.CommandText = sql.ToString();
 
-            using (var reader = cmd.ExecuteReader())
+            using (var reader = await cmd.ExecuteReaderAsync())
             {
-                while (reader.Read())
+                while (await reader.ReadAsync())
                 {
                     results.Add(new FacilityDto
                     {
@@ -243,5 +247,54 @@ public class FacilityManager
         }
 
         return results;
+    }
+}
+
+public class ReceivingFacilityController : Controller
+{
+    private readonly FacilityManager _manager = new FacilityManager();
+
+    [HttpPost]
+    public async Task<ActionResult> Create(FacilityDto facility)
+    {
+        await _manager.CreateFacilityAsync(facility);
+        return Json(new { message = "Facility created successfully." });
+    }
+
+    [HttpGet]
+    public async Task<ActionResult> Get(int id)
+    {
+        var facility = await _manager.ReadFacilityAsync(id);
+        if (facility == null)
+            return HttpNotFound();
+        return Json(facility, JsonRequestBehavior.AllowGet);
+    }
+
+    [HttpPost]
+    public async Task<ActionResult> Update(FacilityDto facility)
+    {
+        await _manager.UpdateFacilityAsync(facility);
+        return Json(new { message = "Facility updated successfully." });
+    }
+
+    [HttpPost]
+    public async Task<ActionResult> Delete(int id)
+    {
+        await _manager.DeleteFacilityAsync(id);
+        return Json(new { message = "Facility deleted successfully." });
+    }
+
+    [HttpGet]
+    public async Task<ActionResult> GetAll()
+    {
+        var facilities = await _manager.GetAllFacilitiesAsync();
+        return Json(facilities, JsonRequestBehavior.AllowGet);
+    }
+
+    [HttpGet]
+    public async Task<ActionResult> Search(string facilityName = null, string city = null, string state = null, string zip = null)
+    {
+        var results = await _manager.SearchFacilitiesAsync(facilityName, city, state, zip);
+        return Json(results, JsonRequestBehavior.AllowGet);
     }
 }
