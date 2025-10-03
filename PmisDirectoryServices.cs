@@ -1,267 +1,168 @@
+// File: Services/LdapUserService.cs
+// Target: .NET Framework + ASP.NET Web API (System.Web.Http), C# 7.3
 using System;
 using System.Collections.Generic;
 using System.DirectoryServices;
-using System.Text;
 using System.Linq;
-using System.DirectoryServices.Protocols; // keep so your signatures keep working
+using System.Text;
 
-namespace Pmis.DirectoryServices
+namespace Company.Directory
 {
-    public enum FilterComp { None, And, Or, Not }
-
-    public sealed class LdapEntryItem : Dictionary<string, string> { }
-
-    public static class LdapUtility
+    public interface ILdapUserService
     {
-        // ---------- Your existing helper signatures ----------
-        public static Func<string, string> GenerateLDAPQueryString(string attributes, FilterComp condition = FilterComp.None)
+        /// <summary>Get attributes for the currently logged-in Windows user (IIS Windows Auth).</summary>
+        IDictionary<string, string> GetCurrentUserAttributes(IEnumerable<string> attributes);
+
+        /// <summary>Get attributes by sAMAccountName (e.g., "jdoe").</summary>
+        IDictionary<string, string> GetBySamAccountName(string samAccountName, IEnumerable<string> attributes);
+
+        /// <summary>Get attributes by UPN (e.g., "jdoe@contoso.com").</summary>
+        IDictionary<string, string> GetByUpn(string userPrincipalName, IEnumerable<string> attributes);
+    }
+
+    public sealed class LdapUserService : ILdapUserService
+    {
+        public IDictionary<string, string> GetCurrentUserAttributes(IEnumerable<string> attributes)
         {
-            if (string.IsNullOrWhiteSpace(attributes))
-                throw new ArgumentNullException(nameof(attributes), "attributes cannot be null");
+            // Uses the worker process identity/Windows auth to bind; no password required.
+            var sam = Environment.UserName; // "jdoe"
+            return GetBySamAccountName(sam, attributes);
+        }
 
-            var op = GetFilterCompString(condition);
-            var parts = attributes.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
-                                  .Select(a => a.Trim())
-                                  .ToArray();
+        public IDictionary<string, string> GetBySamAccountName(string samAccountName, IEnumerable<string> attributes)
+        {
+            if (string.IsNullOrWhiteSpace(samAccountName))
+                throw new ArgumentNullException(nameof(samAccountName));
 
-            if (condition == FilterComp.Not && parts.Length > 1)
-                throw new ArgumentException("NOT with multiple attributes is ambiguous in simple builder.");
+            var filter = $"(&(objectCategory=person)(objectClass=user)(sAMAccountName={EscapeLdapFilter(samAccountName)}))";
+            return QuerySingleUser(filter, attributes);
+        }
 
-            if (condition == FilterComp.Not)
-                return (value) => string.IsNullOrEmpty(value)
-                    ? throw new ArgumentNullException(nameof(value), "value cannot be null")
-                    : $"(!({parts[0]}={Escape(value)}))";
+        public IDictionary<string, string> GetByUpn(string userPrincipalName, IEnumerable<string> attributes)
+        {
+            if (string.IsNullOrWhiteSpace(userPrincipalName))
+                throw new ArgumentNullException(nameof(userPrincipalName));
 
-            // default to AND when None (keeps old behavior that grouped)
-            if (op.Length == 0) op = "&";
+            var filter = $"(&(objectCategory=person)(objectClass=user)(userPrincipalName={EscapeLdapFilter(userPrincipalName)}))";
+            return QuerySingleUser(filter, attributes);
+        }
 
-            return (value) =>
+        // ----- Internals -----
+
+        private static IDictionary<string, string> QuerySingleUser(string ldapFilter, IEnumerable<string> attributes)
+        {
+            var requested = NormalizeAttributes(attributes);
+
+            var domainDn = GetDefaultNamingContext();
+            if (string.IsNullOrWhiteSpace(domainDn))
+                throw new InvalidOperationException("Could not read RootDSE.defaultNamingContext.");
+
+            using (var root = new DirectoryEntry($"LDAP://{domainDn}")) // binds with app pool / Windows auth identity
+            using (var searcher = new DirectorySearcher(root))
             {
-                if (string.IsNullOrEmpty(value))
-                    throw new ArgumentNullException(nameof(value), "value cannot be null");
+                searcher.Filter = ldapFilter;
+                searcher.PageSize = 1000;
+                searcher.SizeLimit = 1;
 
-                var sb = new StringBuilder();
-                sb.Append('(').Append(op);
-                foreach (var p in parts)
-                    sb.Append('(').Append(p).Append('=').Append(Escape(value)).Append(')');
-                sb.Append(')');
-                return sb.ToString();
-            };
+                searcher.PropertiesToLoad.Clear();
+                foreach (var a in requested) searcher.PropertiesToLoad.Add(a);
+                if (!requested.Contains("distinguishedName", StringComparer.OrdinalIgnoreCase))
+                    searcher.PropertiesToLoad.Add("distinguishedName");
+
+                var res = searcher.FindOne();
+                if (res == null)
+                    return requested.ToDictionary(a => a, a => "(not found)", StringComparer.OrdinalIgnoreCase);
+
+                return BuildResult(res, requested);
+            }
         }
 
-        public static string GetFilterCompString(FilterComp condition) =>
-            condition switch
+        private static IDictionary<string, string> BuildResult(SearchResult res, IEnumerable<string> requested)
+        {
+            var dict = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+
+            foreach (var attr in requested)
+                dict[attr] = ReadProp(res, attr);
+
+            var dn = ReadProp(res, "distinguishedName");
+            if (!string.IsNullOrWhiteSpace(dn))
+                dict["distinguishedName"] = dn;
+
+            return dict;
+        }
+
+        private static string ReadProp(SearchResult res, string prop)
+        {
+            if (!res.Properties.Contains(prop)) return "(not set)";
+            var col = res.Properties[prop];
+            if (col == null || col.Count == 0) return "(not set)";
+
+            var items = new List<string>(col.Count);
+            foreach (var v in col)
             {
-                FilterComp.And => "&",
-                FilterComp.Or  => "|",
-                FilterComp.Not => "!",
-                _              => string.Empty
-            };
-
-        // ---------- LOOKUP: same signatures as before ----------
-
-        // Overload with LdapConnection parameter kept for compatibility.
-        public static List<LdapEntryItem> LookUp(LdapConnection ldapConnection,
-                                                 LdapOptions options,
-                                                 string searchString,
-                                                 string[] searchAttributes)
-        {
-            // We intentionally ignore the socket and do the search through S.DS.
-            return LookupWithDirectoryServices(options, searchString, searchAttributes);
+                if (v == null) continue;
+                if (v is byte[] bytes)
+                    items.Add(BitConverter.ToString(bytes).Replace("-", "")); // hex
+                else
+                    items.Add(v.ToString());
+            }
+            return items.Count == 1 ? items[0] : string.Join("; ", items);
         }
 
-        public static List<LdapEntryItem> LookUp(LdapOptions options,
-                                                 string searchString,
-                                                 string[] searchAttributes)
+        private static IReadOnlyList<string> NormalizeAttributes(IEnumerable<string> attributes)
         {
-            return LookupWithDirectoryServices(options, searchString, searchAttributes);
+            var defaults = new[] { "displayName", "mail", "givenName", "sn", "userPrincipalName", "sAMAccountName" };
+            if (attributes == null) return defaults;
+
+            var list = new List<string>();
+            foreach (var a in attributes)
+            {
+                if (string.IsNullOrWhiteSpace(a)) continue;
+                // support comma-delimited strings passed in as a single value
+                var parts = a.Split(new[] { ',' }, StringSplitOptions.RemoveEmptyEntries)
+                             .Select(s => s.Trim());
+                list.AddRange(parts);
+            }
+
+            var distinct = list
+                .Where(s => !string.IsNullOrWhiteSpace(s))
+                .Distinct(StringComparer.OrdinalIgnoreCase)
+                .ToList();
+
+            return distinct.Count > 0 ? distinct : defaults;
         }
 
-        // ---------- VALIDATE USER: same signature ----------
-
-        public static bool ValidateUser(LdapOptions options, string userName, string password)
+        private static string GetDefaultNamingContext()
         {
-            // Try resolve DN first (using UserSearchKey if provided)
-            string userDn = TryResolveUserDn(options, userName);
-
-            // Choose best identity to bind with
-            string bindIdentity = !string.IsNullOrEmpty(userDn)
-                                  ? userDn
-                                  : BuildDomainQualified(options, userName);
-
             try
             {
-                using var entry = new DirectoryEntry(BuildLdapPath(options),
-                                                     bindIdentity,
-                                                     password,
-                                                     MapAuthTypes(options));
-                // Force bind
-                var _ = entry.NativeObject;
-                return true;
+                using (var rootDse = new DirectoryEntry("LDAP://RootDSE"))
+                    return rootDse.Properties["defaultNamingContext"]?.Value as string;
             }
             catch
             {
-                return false;
+                return null;
             }
         }
 
-        // ---------- (Optional) Keep this if other code calls it ----------
-        public static LdapConnection GetLdapConnection(LdapOptions options)
+        // RFC 4515 escaping for LDAP filter literals
+        private static string EscapeLdapFilter(string input)
         {
-            // If other code still expects a Protocols connection, keep returning it.
-            var id = new LdapDirectoryIdentifier(options.HostName, options.PortNumber, true, false);
-            var conn = new LdapConnection(id)
+            if (input == null) return null;
+            var sb = new StringBuilder(input.Length);
+            foreach (var c in input)
             {
-                AuthType = options.AuthenticationType
-            };
-            if (!string.IsNullOrEmpty(options.UserName))
-                conn.Credential = new System.Net.NetworkCredential(options.UserName, options.Password);
-
-            if (options.EnableSsl)
-                conn.SessionOptions.SecureSocketLayer = true;
-
-            return conn;
-        }
-
-        // =====================================================
-        // =============== Internal S.DS helpers ===============
-        // =====================================================
-
-        private static List<LdapEntryItem> LookupWithDirectoryServices(LdapOptions options,
-                                                                       string filter,
-                                                                       string[] attrs)
-        {
-            if (string.IsNullOrWhiteSpace(filter))
-                throw new ArgumentNullException(nameof(filter));
-
-            var list = new List<LdapEntryItem>();
-
-            using var root = new DirectoryEntry(BuildLdapPath(options),
-                                                options.UserName,
-                                                options.Password,
-                                                MapAuthTypes(options));
-
-            using var ds = new DirectorySearcher(root)
-            {
-                Filter = filter,
-                SearchScope = MapScope(options.Scope),
-                PageSize = 1000
-            };
-
-            if (attrs != null && attrs.Length > 0)
-            {
-                ds.PropertiesToLoad.Clear();
-                foreach (var a in attrs) ds.PropertiesToLoad.Add(a);
-            }
-
-            foreach (SearchResult sr in ds.FindAll())
-            {
-                var item = new LdapEntryItem();
-
-                if (attrs != null && attrs.Length > 0)
+                switch (c)
                 {
-                    foreach (var a in attrs)
-                    {
-                        var values = sr.Properties[a];
-                        item[a] = (values != null && values.Count > 0) ? values[0]?.ToString() ?? "" : "";
-                    }
+                    case '\\': sb.Append(@"\5c"); break;
+                    case '*':  sb.Append(@"\2a"); break;
+                    case '(':  sb.Append(@"\28"); break;
+                    case ')':  sb.Append(@"\29"); break;
+                    case '\0': sb.Append(@"\00"); break;
+                    default:   sb.Append(c); break;
                 }
-                else
-                {
-                    foreach (string propName in sr.Properties.PropertyNames)
-                    {
-                        var values = sr.Properties[propName];
-                        item[propName] = (values != null && values.Count > 0) ? values[0]?.ToString() ?? "" : "";
-                    }
-                }
-
-                list.Add(item);
             }
-
-            return list;
-        }
-
-        private static string TryResolveUserDn(LdapOptions options, string userName)
-        {
-            if (string.IsNullOrEmpty(userName)) return null;
-
-            // If a DN already
-            if (userName.IndexOf("DC=", StringComparison.OrdinalIgnoreCase) >= 0 ||
-                userName.IndexOf("CN=", StringComparison.OrdinalIgnoreCase) >= 0)
-                return userName;
-
-            using var root = new DirectoryEntry(BuildLdapPath(options),
-                                                options.UserName,
-                                                options.Password,
-                                                MapAuthTypes(options));
-
-            using var ds = new DirectorySearcher(root)
-            {
-                SearchScope = MapScope(options.Scope),
-                PageSize = 1
-            };
-            ds.PropertiesToLoad.Add("distinguishedName");
-
-            if (!string.IsNullOrWhiteSpace(options.UserSearchKey))
-                ds.Filter = $"({Escape(options.UserSearchKey)}={Escape(userName)})";
-            else
-                ds.Filter = $"(|(sAMAccountName={Escape(userName)})(userPrincipalName={Escape(userName)}))";
-
-            var result = ds.FindOne();
-            if (result != null && result.Properties.Contains("distinguishedName"))
-                return result.Properties["distinguishedName"][0]?.ToString();
-
-            return null;
-        }
-
-        private static string BuildLdapPath(LdapOptions options)
-        {
-            var scheme = options.EnableSsl ? "LDAPS" : "LDAP";
-            // LDAP://host:port/BASE_DN
-            var baseDn = string.IsNullOrWhiteSpace(options.SearchStartAt) ? "" : options.SearchStartAt;
-            return $"{scheme}://{options.HostName}:{options.PortNumber}/{baseDn}";
-        }
-
-        private static AuthenticationTypes MapAuthTypes(LdapOptions options)
-        {
-            // Map Protocols.AuthType to DirectoryServices AuthenticationTypes
-            AuthenticationTypes at = options.AuthenticationType switch
-            {
-                AuthType.Anonymous => AuthenticationTypes.Anonymous,
-                AuthType.Basic     => AuthenticationTypes.None,   // basic/clear; prefer Secure where possible
-                AuthType.Negotiate => AuthenticationTypes.Secure,
-                _                  => AuthenticationTypes.Secure
-            };
-
-            if (options.EnableSsl) at |= AuthenticationTypes.SecureSocketsLayer;
-            return at;
-        }
-
-        private static SearchScope MapScope(System.DirectoryServices.Protocols.SearchScope scopeP) =>
-            scopeP switch
-            {
-                System.DirectoryServices.Protocols.SearchScope.Base     => SearchScope.Base,
-                System.DirectoryServices.Protocols.SearchScope.OneLevel => SearchScope.OneLevel,
-                _                                                       => SearchScope.Subtree
-            };
-
-        private static string BuildDomainQualified(LdapOptions options, string userName)
-        {
-            if (string.IsNullOrWhiteSpace(options.Domain)) return userName;
-            if (userName.Contains("@")) return userName; // looks like UPN already
-            return $"{options.Domain}\\{userName}";
-        }
-
-        // RFC4515-ish escaping for filter values
-        private static string Escape(string value)
-        {
-            if (value == null) return null;
-            return value
-                .Replace(@"\", @"\5c")
-                .Replace("*", @"\2a")
-                .Replace("(", @"\28")
-                .Replace(")", @"\29")
-                .Replace("\0", @"\00");
+            return sb.ToString();
         }
     }
 }
